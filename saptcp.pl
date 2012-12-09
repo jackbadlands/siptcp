@@ -9,37 +9,38 @@ use IO::Socket;
 #my $localport=5040;
 
 
-my $conf_localaddr = "127.0.0.2";
-my $conf_localport = 0;
-my $conf_mode = "l";
-my $conf_tcpaddr = "0.0.0.0";
-my $conf_tcpport = 5040;
+my $conf_localaddr;
+my $conf_localport;
+my $conf_remoteaddr;
+my $conf_remoteport;
+my $conf_myip;
+my $do_open_socket;
+my $conf_mode;
+my $conf_tcpaddr;
+my $conf_tcpport;
 
-if ( $#ARGV != 4 ) {
-    print STDERR "Usage: saptcp udp_host udp_port tcp_mode tcp_host tcp_port\n";
+if ( $#ARGV != 3 and $#ARGV != 7) {
+    print STDERR "Usage: saptcp tcp_mode tcp_host tcp_port ip_address_to_report [udp_local_address ".
+                         "udp_local_port udp_remove_address udp_remove_port]\n";
     print STDERR "Examples:\n";
-    print STDERR "   Listen: saptcp 0.0.0.0 0 l 0.0.0.0 5055\n";
-    print STDERR "   Connect: saptcp 127.0.0.1 5060 c 1.2.3.4 5055\n";
+    print STDERR "   Server side: saptcp l 0.0.0.0 5055 1.2.3.4\n";
+    print STDERR "   NATted client side: saptcp c 1.2.3.4 5055 127.0.0.1 127.0.0.1 5060 81.23.228.129 5060\n";
     exit 1;
 } else {
-    $conf_localaddr = $ARGV[0];
-    $conf_localport = $ARGV[1];
-    $conf_mode = $ARGV[2];
-    $conf_tcpaddr = $ARGV[3];
-    $conf_tcpport =$ARGV[4];
+    $conf_mode = $ARGV[0];
+    $conf_tcpaddr = $ARGV[1];
+    $conf_tcpport =$ARGV[2];
+    $conf_myip =$ARGV[3];
+    if ($#ARGV == 7) {
+        $do_open_socket = 1;
+        $conf_localaddr = $ARGV[4];
+        $conf_localport = $ARGV[5];
+        $conf_remoteaddr = $ARGV[6];
+        $conf_remoteport = $ARGV[7];
+    } else {
+        $do_open_socket = 0;
+    }
 }
-
-my $sock = IO::Socket::INET->new(
-    Proto    => 'udp',
-    LocalPort => 0,
-    #LocalAddr => 'localhost',
-    #PeerAddr => 'localhost',
-    #PeerPort => 5041,
-) or die "Could not create socket: $!\n";
-$sock->bind($conf_localport, INADDR_ANY);
-        
-my $sockport = $sock->sockport;
-my $sockaddr = $conf_localaddr;
 
 our $sv;
 
@@ -72,39 +73,71 @@ obtain_cl();
 our $sel = IO::Select->new();
 
 $sel->add($cl);
-$sel->add($sock);
-$sel->add($sv);
+$sel->add($sv) if $conf_mode eq "l";
 
 my $buf = "";
 
-my %portmaps_f = ();
-my %portmaps_b = ();
 my %sockets = ();
 my %socket2port = ();
 my %received_counter = ();
+my %mapped_hosts = ();
+my %mapped_ports = ();
+my %hostport2map = ();
+my %capital_P_mappings = ();
 
-sub get_portmap($) {
+sub get_portmap($$) {
+    my $original_host = shift;
     my $original_port = shift;
-    
-    unless (exists $portmaps_f{$original_port}) {
+    my $hostport = sprintf("%s%04x", unpack ("H*",$original_host), $original_port);
+    unless (exists $hostport2map{$hostport}) {
         my $s = IO::Socket::INET->new(
             Proto    => 'udp',
             Reuse => 1,
         );
         $s->bind(0, INADDR_ANY);
         my $new_port = $s->sockport;
-        print STDERR "New mapping: $original_port->$new_port\n";
-        $portmaps_f{$original_port} = $new_port;
-        $portmaps_b{$new_port} = $original_port;
+        print STDERR "New mapping: ".inet_ntoa($original_host).":$original_port->$new_port\n";
+        $mapped_hosts{$new_port} = $original_host;
+        $mapped_ports{$new_port} = $original_port;
         $sockets{$new_port} = $s;
         $socket2port{$s} = $new_port;
+        $hostport2map{$hostport} = $new_port;
         $received_counter{$new_port} = 0;
+        $capital_P_mappings{$new_port} = 0;
         $sel->add($s);
         
     }
     
-    return $portmaps_f{$original_port};
+    return $hostport2map{$hostport};
 }
+
+
+my $sock = undef;
+my $sock_port = undef;
+my $remoteaddr = undef;
+my $remoteport = undef;
+if ($do_open_socket) {
+    $sock = IO::Socket::INET->new(
+        Proto    => 'udp',
+        LocalPort => 0,
+        #LocalAddr => 'localhost',
+        #PeerAddr => 'localhost',
+        #PeerPort => 5041,
+    ) or die "Could not create socket: $!\n";
+    $sock->bind($conf_localport, inet_aton($conf_localaddr));
+    $sock_port = $sock->sockport;
+    
+    $remoteaddr = inet_aton($conf_remoteaddr);
+    $remoteport = $conf_remoteport;
+    
+    $socket2port{$sock} = $conf_localport;
+    $mapped_hosts{$conf_localport} = $remoteaddr;
+    $mapped_ports{$conf_localport} = $remoteport;
+    $capital_P_mappings{$conf_localport} = 1;
+    
+    $sel->add($sock);
+}
+
 
 while(my @ready = $sel->can_read) {
     foreach my $fh (@ready) {
@@ -114,7 +147,7 @@ while(my @ready = $sel->can_read) {
             $sel->add($cl);
         }
         elsif($fh == $cl) {
-            $cl->recv($buf, 20);
+            $cl->recv($buf, 28);
             
             unless ($buf) {
                 $sel->remove($fh);
@@ -125,46 +158,67 @@ while(my @ready = $sel->can_read) {
             
             my $cmd = substr($buf,0,1);
             if ($cmd eq "P" or $cmd eq "p") {
-                my $srcport = hex(substr($buf, 1, 4));
-                my $destaddr = pack("H*", substr($buf,5,8));
-                my $destport = hex(substr($buf, 13, 4));
-                my $length = hex(substr($buf,17,3));
-                my $servadr = sockaddr_in($destport, $destaddr);
+                my $srcaddr = pack("H*", substr($buf,1,8));
+                my $srcport = hex(substr($buf, 9, 4));
+                my $destaddr = pack("H*", substr($buf,13,8));
+                my $destport = hex(substr($buf, 21, 4));
+                my $length = hex(substr($buf,25,3));
+                
+                my $srchostport = sprintf("%s04x", unpack ("H*",$srcaddr), $srcport);                
+                my $localport = get_portmap($srcaddr, $srcport);
+                $capital_P_mappings{$localport} = 1;
+                my $socket_to_use = $sockets{$localport};
+                
+                my $destname = sockaddr_in($destport, $destaddr);
                 
                 $cl->recv($buf, $length);
                 
                 if ($cmd eq "P" ) {
                  my $req;
                  $buf =~ /^(.*)/;   $req=$1;
-                 printf STDERR "%s:%s %s\n", inet_ntoa($destaddr), $destport, $req;
+                 printf STDERR "O %s:%s->%s:%s %s\n", 
+                    inet_ntoa($srcaddr), $srcport, 
+                    inet_ntoa($destaddr), $destport, 
+                    $req;
                 
                  $buf =~ s/Contact:.*?\r\n//s;
-                 $buf =~ s/\r\n\r\n/"\r\nContact: <sip:$sockaddr:$sockport>\r\n\r\n"/se;
+                 $buf =~ s/\r\n\r\n/"\r\nContact: <sip:$conf_myip:$localport>\r\n\r\n"/se;
                  
-                 $buf =~ s/IN IP4 [\d\.]+/"IN IP4 $sockaddr"/eg;
+                 $buf =~ s/IN IP4 [\d\.]+/"IN IP4 $conf_myip"/eg;
                  
-                 $buf =~ s/(m=[a-z]+ +)(\d+)/$1 . get_portmap($2)/ge;
-                 $buf =~ s/a=rtcp:(\d+)/"a=rtcp:" . get_portmap($1)/ge;
+                 $buf =~ s/(m=[a-z]+ +)(\d+)/$1 . get_portmap($srcaddr, $2)/ge;
+                 $buf =~ s/a=rtcp:(\d+)/"a=rtcp:" . get_portmap($srcaddr, $1)/ge;
                  $buf =~ s/(a=candidate:.*?UDP +\d+ +)(\d+(?:\.\d){3}) +(\d+)/
-                                      $1.$sockaddr." ".get_portmap($3)   /ge;
-                 $sock->send($buf, MSG_DONTWAIT, $servadr);
-                } else {
-                  my $myport = get_portmap($srcport);
-                  $sock->send($sockets{$myport}, MSG_DONTWAIT, $servadr);
+                                      $1.$conf_myip." ".get_portmap($srcaddr, $3)   /ge;
                 }
+                $socket_to_use->send($buf, MSG_DONTWAIT, $destname);
             }
         }
-        elsif($fh == $sock) {
+        elsif($do_open_socket and $fh == $sock) {
             my $peername = $sock->recv($buf, 4096, MSG_DONTWAIT);
             if ($peername) {
                 my ($peerport, $peeraddr) = sockaddr_in($peername);
                 
-                $cl->send(sprintf("P%04x%s%04x%03x%s", $sockport, unpack ("H*",$peeraddr), $peerport, length($buf), $buf));
+                my $req;
+                $buf =~ /^(.*)/;   $req=$1;
+                printf STDERR "I %s:%s->%s:%s %s\n", 
+                    inet_ntoa($peeraddr), $peerport, 
+                    inet_ntoa($remoteaddr), $remoteport, 
+                    $req;
+                
+                $cl->send(sprintf("P%s%04x%s%04x%03x%s",
+                    unpack ("H*",$peeraddr),   $peerport,
+                    unpack ("H*",$remoteaddr), $remoteport, 
+                    length($buf), $buf));
             }
         }
         else {
             my $port = $socket2port{$fh};
-            my $mappedport = $portmaps_b{$port};
+            my $mappedhost = $mapped_hosts{$port};
+            my $mappedport = $mapped_ports{$port};
+            my $letter = 'p';
+            $letter = 'P' if $capital_P_mappings{$port};
+            
             my $peername = $fh->recv($buf, 4096, MSG_DONTWAIT);
             
             if ($peername) {
@@ -172,12 +226,24 @@ while(my @ready = $sel->can_read) {
                 
                 ++$received_counter{$port};
                 
-                if($received_counter{$port} == 1) {
-                    print STDERR "Mapping $mappedport->$port actually used by ".inet_ntoa($peeraddr).":$peerport\n";
+                if ($letter eq "P") {
+                    my $req;
+                    $buf =~ /^(.*)/;   $req=$1;
+                    printf STDERR "i %s:%s->%s:%s %s\n", 
+                        inet_ntoa($peeraddr), $peerport, 
+                        inet_ntoa($mappedhost), $mappedport, 
+                        $req;
+                } else {
+                    if($received_counter{$port} == 1) {
+                        print STDERR "Mapping ".inet_ntoa($mappedhost).":$mappedport".
+                          "->$port actually used by ".inet_ntoa($peeraddr).":$peerport\n";
+                    }
                 }
                 
-                $cl->send(sprintf("p%04x%s%04x%03x%s", 
-                    $mappedport, unpack ("H*",$peeraddr), $peerport, length($buf), $buf));
+                $cl->send(sprintf("%s%s%04x%s%04x%03x%s", $letter,
+                    unpack ("H*",$peeraddr), $peerport, 
+                    unpack ("H*",$mappedhost), $mappedport, 
+                    length($buf), $buf));
             }
         }
     }
