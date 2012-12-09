@@ -8,6 +8,7 @@ use IO::Socket;
 #my $localaddr="localhost";
 #my $localport=5040;
 
+$|=1;
 
 my $conf_localaddr;
 my $conf_localport;
@@ -20,11 +21,11 @@ my $conf_tcpaddr;
 my $conf_tcpport;
 
 if ( $#ARGV != 3 and $#ARGV != 7) {
-    print STDERR "Usage: saptcp tcp_mode tcp_host tcp_port ip_address_to_report [udp_local_address ".
+    print "Usage: saptcp tcp_mode tcp_host tcp_port ip_address_to_report [udp_local_address ".
                          "udp_local_port udp_remove_address udp_remove_port]\n";
-    print STDERR "Examples:\n";
-    print STDERR "   Server side: saptcp l 0.0.0.0 5055 1.2.3.4\n";
-    print STDERR "   NATted client side: saptcp c 1.2.3.4 5055 127.0.0.1 127.0.0.1 5060 81.23.228.129 5060\n";
+    print "Examples:\n";
+    print "   Server side: saptcp l 0.0.0.0 5055 1.2.3.4\n";
+    print "   NATted client side: saptcp c 1.2.3.4 5055 127.0.0.1 127.0.0.1 5060 81.23.228.129 5060\n";
     exit 1;
 } else {
     $conf_mode = $ARGV[0];
@@ -96,7 +97,7 @@ sub get_portmap($$) {
         );
         $s->bind(0, INADDR_ANY);
         my $new_port = $s->sockport;
-        print STDERR "New mapping: ".inet_ntoa($original_host).":$original_port->$new_port\n";
+        print "New mapping: ".inet_ntoa($original_host).":$original_port->$new_port\n";
         $mapped_hosts{$new_port} = $original_host;
         $mapped_ports{$new_port} = $original_port;
         $sockets{$new_port} = $s;
@@ -105,7 +106,6 @@ sub get_portmap($$) {
         $received_counter{$new_port} = 0;
         $capital_P_mappings{$new_port} = 0;
         $sel->add($s);
-        
     }
     
     return $hostport2map{$hostport};
@@ -120,9 +120,6 @@ if ($do_open_socket) {
     $sock = IO::Socket::INET->new(
         Proto    => 'udp',
         LocalPort => 0,
-        #LocalAddr => 'localhost',
-        #PeerAddr => 'localhost',
-        #PeerPort => 5041,
     ) or die "Could not create socket: $!\n";
     $sock->bind($conf_localport, inet_aton($conf_localaddr));
     $sock_port = $sock->sockport;
@@ -166,7 +163,7 @@ while(my @ready = $sel->can_read) {
                 
                 my $srchostport = sprintf("%s04x", unpack ("H*",$srcaddr), $srcport);                
                 my $localport = get_portmap($srcaddr, $srcport);
-                $capital_P_mappings{$localport} = 1;
+                $capital_P_mappings{$localport} = 1 if $cmd eq "P";
                 my $socket_to_use = $sockets{$localport};
                 
                 my $destname = sockaddr_in($destport, $destaddr);
@@ -176,7 +173,7 @@ while(my @ready = $sel->can_read) {
                 if ($cmd eq "P" ) {
                  my $req;
                  $buf =~ /^(.*)/;   $req=$1;
-                 printf STDERR "O %s:%s->%s:%s %s\n", 
+                 printf "O %s:%s->%s:%s %s\n", 
                     inet_ntoa($srcaddr), $srcport, 
                     inet_ntoa($destaddr), $destport, 
                     $req;
@@ -188,8 +185,12 @@ while(my @ready = $sel->can_read) {
                  
                  $buf =~ s/(m=[a-z]+ +)(\d+)/$1 . get_portmap($srcaddr, $2)/ge;
                  $buf =~ s/a=rtcp:(\d+)/"a=rtcp:" . get_portmap($srcaddr, $1)/ge;
-                 $buf =~ s/(a=candidate:.*?UDP +\d+ +)(\d+(?:\.\d){3}) +(\d+)/
-                                      $1.$conf_myip." ".get_portmap($srcaddr, $3)   /ge;
+                 $buf =~ s/(a=candidate:.*?UDP +\d+ +)(\d+(?:\.\d+){3}) +(\d+)/
+                                      $1.$conf_myip." ".get_portmap(inet_aton($2), $3)   /ge;
+                 $buf =~ s/Content-Length:.*?\r\n//s;
+                 $buf =~ /\r\n\r\n(.*)$/s;
+                 my $cllen = length($1);
+                 $buf =~ s/\r\n\r\n/"\r\nContent-Length: $cllen\r\n\r\n"/se;
                 }
                 $socket_to_use->send($buf, MSG_DONTWAIT, $destname);
             }
@@ -201,7 +202,7 @@ while(my @ready = $sel->can_read) {
                 
                 my $req;
                 $buf =~ /^(.*)/;   $req=$1;
-                printf STDERR "I %s:%s->%s:%s %s\n", 
+                printf "I %s:%s->%s:%s %s\n", 
                     inet_ntoa($peeraddr), $peerport, 
                     inet_ntoa($remoteaddr), $remoteport, 
                     $req;
@@ -229,13 +230,13 @@ while(my @ready = $sel->can_read) {
                 if ($letter eq "P") {
                     my $req;
                     $buf =~ /^(.*)/;   $req=$1;
-                    printf STDERR "i %s:%s->%s:%s %s\n", 
+                    printf "i %s:%s->%s:%s %s\n", 
                         inet_ntoa($peeraddr), $peerport, 
                         inet_ntoa($mappedhost), $mappedport, 
                         $req;
                 } else {
                     if($received_counter{$port} == 1) {
-                        print STDERR "Mapping ".inet_ntoa($mappedhost).":$mappedport".
+                        print "Mapping ".inet_ntoa($mappedhost).":$mappedport".
                           "->$port actually used by ".inet_ntoa($peeraddr).":$peerport\n";
                     }
                 }
