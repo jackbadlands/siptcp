@@ -64,11 +64,16 @@ sub obtain_cl() {
     if ($conf_mode eq "l") { 
         $cl = $sv->accept();
     } else {
+        for(;;) {
         $cl = IO::Socket::INET->new(
             Proto    => 'tcp',
             PeerPort => $conf_tcpport,
             PeerAddr => $conf_tcpaddr,
-        ) or die "Could not create socket: $!\n";
+        );
+        last if $cl;
+        print "$@\n";
+        sleep 5;
+        }
     }
 }
 
