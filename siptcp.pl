@@ -43,6 +43,9 @@ if ( $#ARGV != 3 and $#ARGV != 7) {
     }
 }
 
+open LOG, ">", ($ENV{"LOG"} or "/dev/null") or die "Can't open log";
+select LOG; $|=1; select STDOUT;
+
 our $sv;
 
 if ($conf_mode eq "l") {
@@ -86,7 +89,8 @@ my %mapped_ports = ();
 my %hostport2map = ();
 my %capital_P_mappings = ();
 
-sub get_portmap($$) {
+sub get_portmap($$$) {
+    my $capital_P = shift;
     my $original_host = shift;
     my $original_port = shift;
     my $hostport = sprintf("%s%04x", unpack ("H*",$original_host), $original_port);
@@ -104,7 +108,7 @@ sub get_portmap($$) {
         $socket2port{$s} = $new_port;
         $hostport2map{$hostport} = $new_port;
         $received_counter{$new_port} = 0;
-        $capital_P_mappings{$new_port} = 0;
+        $capital_P_mappings{$new_port} = $capital_P;
         $sel->add($s);
     }
     
@@ -136,6 +140,179 @@ if ($do_open_socket) {
 }
 
 
+my %patch_address_fw = ();
+my %patch_address_bw = ();
+my %known_hosts_on_our_side = ($conf_myip => 1);
+my %known_hosts_on_remote_side = ();
+
+sub add_known_address($) {
+    my $host = shift;
+    my $n = inet_ntoa($host);
+    if (exists $known_hosts_on_remote_side{$n}) {
+        print LOG "Host $n already on remove side\n";
+        return;
+    }
+    if (not exists $known_hosts_on_our_side{$n}) {
+        print "New known host on our side: $n\n";
+        print LOG "New known host on our side: $n\n";
+        $known_hosts_on_our_side{$n} = 1;
+    }
+}
+
+sub add_known_remote_address($) {
+    my $host = shift;
+    my $n = inet_ntoa($host);  
+    if (exists $known_hosts_on_our_side{$n}) {
+        print LOG "Host $n already on our side\n";
+        return;
+    }
+    if (not exists $known_hosts_on_remote_side{$n}) {
+        print "New known host on the remote side: $n\n";
+        print LOG "New known host on the remote side: $n\n";
+        $known_hosts_on_remote_side{$n} = 1;
+    }  
+}
+
+sub patch_address($) {
+    my $address = $1;
+    
+    return $address if exists $patch_address_bw{$address};
+    
+    my $host;
+    my $port = 5060;
+    if ((index $address, ":") == -1) {
+        $host = inet_aton($address);
+    } else {
+        my ($h, $p) = split ":", $address;
+        $host = inet_aton($h);
+        $port = $p;
+    }
+    
+    return $address if exists $known_hosts_on_our_side{inet_ntoa($host)};
+    
+    add_known_remote_address($host);
+    
+    my $mapped_port = get_portmap(1, $host, $port);
+    my $patched = "$conf_myip:$mapped_port";
+    
+    print LOG "Changing $address to $patched\n";
+    $patch_address_fw{$address} = $patched;
+    $patch_address_bw{$patched} = $address;
+    return $patched;
+}
+
+
+sub patch_address_rp($$) {
+    my $host = shift;
+    my $port = shift;
+    
+    my $orig = "received=$host;rport=$port";
+    
+    return $orig if exists $known_hosts_on_our_side{$host};
+    return $orig if exists $patch_address_bw{$orig};
+
+    add_known_remote_address(inet_aton($host));
+    my $mapped_port = get_portmap(1, inet_aton($host), $port);
+    my $patched = "received=$conf_myip;rport=$mapped_port";
+    
+    print LOG "Changing $orig to $patched\n";
+    
+    $patch_address_fw{$orig} = $patched;
+    $patch_address_bw{$patched} = $orig;
+    
+    return $patched;    
+}
+
+
+sub process_capital_P_fow($$) {
+    my $buf = shift;
+    my $srcaddr = shift;
+    
+    return $buf unless $buf =~ /\r\n\r\n/;
+    
+    $buf =~ /(.*?\r\n)\r\n(.*)/s;
+    my ($headers, $data) = ($1, $2);
+    printf LOG "headers len is %d, data len is %d\n", length $headers, length $data;
+
+    $headers =~ s!(?<=[^=\d])(\d+(?:\.\d+){3}(?:\:\d+)?)!patch_address($1)!ge;
+    $headers =~ s!received\=(\d+(?:\.\d+){3})\;rport\=(\d+)!patch_address_rp($1,$2)!ge;
+
+    my $c_addr = $srcaddr;
+    if ($data =~ /\r\nc=IN IP4 (\d+(?:\.\d+){3})/s) {
+        $c_addr = inet_aton($1);
+        add_known_remote_address($c_addr);
+    }
+
+    $data =~ s/IN IP4 [\d\.]+/"IN IP4 $conf_myip"/eg;
+
+    $data =~ s/(m=[a-z]+ +)(\d+)/$1 . get_portmap(0, $c_addr, $2)/ge;
+    $data =~ s/a=rtcp:(\d+)/"a=rtcp:" . get_portmap(0, $c_addr, $1)/ge;
+    $data =~ s/(a=candidate:.*?UDP +\d+ +)(\d+(?:\.\d+){3}) +(\d+)/
+                      $1.$conf_myip." ".get_portmap(0, inet_aton($2), $3)   /ge;
+    my $cllen = length($data);
+    $headers =~ s/Content-Length:.*?\d+\r\n//s;
+    $headers .= "Content-Length: $cllen\r\n";
+    $buf = "$headers\r\n$data";
+
+    printf LOG "Rewritten:\n%s\n", $buf;
+    return $buf;
+}
+
+sub patch_address_rev($) {
+    my $address = $1;
+    
+    if (exists $patch_address_bw{$address}) {
+        my $patched = $patch_address_bw{$address};
+        print LOG "Changing back $address to $patched\n";
+        return $patched;
+    } else {
+        print LOG "Preserving $address\n";
+    }
+    
+    my @hostport = split /:/, $address;
+    add_known_address(inet_aton($hostport[0]));
+    
+    return $address;
+}
+
+
+sub patch_address_rp_rev($$) {
+    my $host = shift;
+    my $port = shift;
+    
+    my $orig = "received=$host;rport=$port";
+    
+    return $orig if exists $known_hosts_on_our_side{$host};
+    if (exists $patch_address_bw{$orig}) {
+        my $patched = $patch_address_bw{$orig};
+        print LOG "Changing back $orig to $patched\n";
+        return $patched;
+    }
+    
+    add_known_address(inet_aton($host));
+    
+    return $orig;    
+}
+
+
+sub process_capital_P_back($) {
+    my $buf = shift;
+    
+    return $buf unless $buf =~ /\r\n\r\n/;
+    
+    $buf =~ /(.*?\r\n)\r\n(.*)/s;
+    my ($headers, $data) = ($1, $2);
+    printf LOG "headers len is %d, data len is %d [back]\n", length $headers, length $data;
+
+    $headers =~ s!(?<=[^=\d])(\d+(?:\.\d+){3}(?:\:\d+)?)!patch_address_rev($1)!ge;    
+    $headers =~ s!received\=(\d+(?:\.\d+){3})\;rport\=(\d+)!patch_address_rp_rev($1,$2)!ge;  
+
+    $buf = "$headers\r\n$data";
+
+    printf LOG "Rewritten [b]:\n%s\n", $buf;
+    return $buf;
+}
+
 while(my @ready = $sel->can_read) {
     foreach my $fh (@ready) {
         if($conf_mode eq "l" and $fh == $sv) {
@@ -147,7 +324,9 @@ while(my @ready = $sel->can_read) {
             $cl->recv($buf, 28);
             
             unless ($buf) {
+                $cl->close();
                 $sel->remove($fh);
+                sleep 1;
                 obtain_cl();
                 $sel->add($cl);
                 next;
@@ -162,13 +341,19 @@ while(my @ready = $sel->can_read) {
                 my $length = hex(substr($buf,25,3));
                 
                 my $srchostport = sprintf("%s04x", unpack ("H*",$srcaddr), $srcport);                
-                my $localport = get_portmap($srcaddr, $srcport);
+                my $localport = get_portmap(0, $srcaddr, $srcport);
                 $capital_P_mappings{$localport} = 1 if $cmd eq "P";
                 my $socket_to_use = $sockets{$localport};
                 
                 my $destname = sockaddr_in($destport, $destaddr);
                 
                 $cl->recv($buf, $length);
+                
+                printf LOG "O%s %s:%s->%s:%s %s\n%s\n", 
+                    $cmd,
+                    inet_ntoa($srcaddr), $srcport, 
+                    inet_ntoa($destaddr), $destport, 
+                    $localport, $buf;
                 
                 if ($cmd eq "P" ) {
                  my $req;
@@ -177,20 +362,7 @@ while(my @ready = $sel->can_read) {
                     inet_ntoa($srcaddr), $srcport, 
                     inet_ntoa($destaddr), $destport, 
                     $req;
-                
-                 $buf =~ s/Contact:.*?\r\n//s;
-                 $buf =~ s/\r\n\r\n/"\r\nContact: <sip:$conf_myip:$localport>\r\n\r\n"/se;
-                 
-                 $buf =~ s/IN IP4 [\d\.]+/"IN IP4 $conf_myip"/eg;
-                 
-                 $buf =~ s/(m=[a-z]+ +)(\d+)/$1 . get_portmap($srcaddr, $2)/ge;
-                 $buf =~ s/a=rtcp:(\d+)/"a=rtcp:" . get_portmap($srcaddr, $1)/ge;
-                 $buf =~ s/(a=candidate:.*?UDP +\d+ +)(\d+(?:\.\d+){3}) +(\d+)/
-                                      $1.$conf_myip." ".get_portmap(inet_aton($2), $3)   /ge;
-                 $buf =~ s/Content-Length:.*?\r\n//s;
-                 $buf =~ /\r\n\r\n(.*)$/s;
-                 my $cllen = length($1);
-                 $buf =~ s/\r\n\r\n/"\r\nContent-Length: $cllen\r\n\r\n"/se;
+                 $buf = process_capital_P_fow($buf, $srcaddr);
                 }
                 $socket_to_use->send($buf, MSG_DONTWAIT, $destname);
             }
@@ -206,6 +378,16 @@ while(my @ready = $sel->can_read) {
                     inet_ntoa($peeraddr), $peerport, 
                     inet_ntoa($remoteaddr), $remoteport, 
                     $req;
+                    
+                
+                printf LOG "I %s:%s->%s:%s %s\n%s\n", 
+                    inet_ntoa($peeraddr), $peerport, 
+                    inet_ntoa($remoteaddr), $remoteport, 
+                    $conf_localport, $buf;
+                    
+                $buf = process_capital_P_back($buf);
+                
+                add_known_address($peeraddr);
                 
                 $cl->send(sprintf("P%s%04x%s%04x%03x%s",
                     unpack ("H*",$peeraddr),   $peerport,
@@ -227,6 +409,13 @@ while(my @ready = $sel->can_read) {
                 
                 ++$received_counter{$port};
                 
+                
+                printf LOG "i%s %s:%s->%s:%s %s\n%s\n", 
+                    $letter,
+                    inet_ntoa($peeraddr), $peerport, 
+                    inet_ntoa($mappedhost), $mappedport, 
+                    $port, $buf;
+                
                 if ($letter eq "P") {
                     my $req;
                     $buf =~ /^(.*)/;   $req=$1;
@@ -234,12 +423,15 @@ while(my @ready = $sel->can_read) {
                         inet_ntoa($peeraddr), $peerport, 
                         inet_ntoa($mappedhost), $mappedport, 
                         $req;
+                    $buf = process_capital_P_back($buf);
                 } else {
                     if($received_counter{$port} == 1) {
                         print "Mapping ".inet_ntoa($mappedhost).":$mappedport".
                           "->$port actually used by ".inet_ntoa($peeraddr).":$peerport\n";
                     }
                 }
+                
+                add_known_address($peeraddr);
                 
                 $cl->send(sprintf("%s%s%04x%s%04x%03x%s", $letter,
                     unpack ("H*",$peeraddr), $peerport, 
@@ -300,5 +492,17 @@ CSeq: 2 BYE
 Contact: <sip:192.168.99.2:5059>
 Max-Forwards: 70
 User-Agent: Linphone/3.5.2 (eXosip2/3.6.0)
+Content-Length: 0
+=cut
+
+=cut
+SIP/2.0 100 Giving a try
+Via: SIP/2.0/UDP 10.23.86.232:5059;received=93.174.88.117;rport=47338;branch=z9hG4bK849396302
+From: <sip:vi0osss@sip2sip.info>;tag=1589358549
+To: "vi0oss" <sip:vi0oss@sip2sip.info>
+Call-ID: 1590842091
+CSeq: 21 INVITE
+Server: SIP Thor on OpenSIPS XS 1.8.0
+Contact: <sip:127.0.0.1:50158>
 Content-Length: 0
 =cut
