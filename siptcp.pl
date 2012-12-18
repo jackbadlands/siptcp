@@ -20,6 +20,9 @@ my $conf_mode;
 my $conf_tcpaddr;
 my $conf_tcpport;
 
+my $single_peer_mode = 0;
+
+
 if ( $#ARGV != 3 and $#ARGV != 7) {
     print "Usage: saptcp tcp_mode tcp_host tcp_port ip_address_to_report [udp_local_address ".
                          "udp_local_port udp_remove_address udp_remove_port]\n";
@@ -42,6 +45,8 @@ if ( $#ARGV != 3 and $#ARGV != 7) {
         $do_open_socket = 0;
     }
 }
+
+$single_peer_mode = $ENV{"SINGLE_PEER"} if exists $ENV{"SINGLE_PEER"};
 
 open LOG, ">", ($ENV{"LOG"} or "/dev/null") or die "Can't open log";
 select LOG; $|=1; select STDOUT;
@@ -125,6 +130,7 @@ my $sock = undef;
 my $sock_port = undef;
 my $remoteaddr = undef;
 my $remoteport = undef;
+my $last_sock_peer_addr = undef;
 if ($do_open_socket) {
     $sock = IO::Socket::INET->new(
         Proto    => 'udp',
@@ -354,21 +360,36 @@ while(my @ready = $sel->can_read) {
                 
                 $cl->recv($buf, $length);
                 
-                printf LOG "O%s %s:%s->%s:%s %s\n%s\n", 
-                    $cmd,
-                    inet_ntoa($srcaddr), $srcport, 
-                    inet_ntoa($destaddr), $destport, 
-                    $localport, $buf;
-                
                 if ($cmd eq "P" ) {
                  my $req;
                  $buf =~ /^(.*)/;   $req=$1;
-                 printf "O %s:%s->%s:%s %s\n", 
-                    inet_ntoa($srcaddr), $srcport, 
-                    inet_ntoa($destaddr), $destport, 
-                    $req;
+                 if ($single_peer_mode and $last_sock_peer_addr) {
+                    $destname = $last_sock_peer_addr;
+                    $socket_to_use = $sock;
+                    printf "O %s:%s->single_peer %s\n", 
+                        inet_ntoa($srcaddr), $srcport, 
+                        $req;                        
+                    printf LOG "OP %s:%s->single_peer\n%s\n", 
+                        inet_ntoa($srcaddr), $srcport, 
+                        $buf;
+                 } else {
+                    printf "O %s:%s->%s:%s %s\n", 
+                        inet_ntoa($srcaddr), $srcport, 
+                        inet_ntoa($destaddr), $destport, 
+                        $req;                    
+                    printf LOG "OP %s:%s->%s:%s %s\n%s\n", 
+                        inet_ntoa($srcaddr), $srcport, 
+                        inet_ntoa($destaddr), $destport, 
+                        $localport, $buf;
+                 }
                  $buf = process_capital_P_fow($buf, $srcaddr);
+                } else {
+                    printf LOG "Op %s:%s->%s:%s %s\n%s\n", 
+                        inet_ntoa($srcaddr), $srcport, 
+                        inet_ntoa($destaddr), $destport, 
+                        $localport, $buf;
                 }
+
                 $socket_to_use->send($buf, MSG_DONTWAIT, $destname);
             }
         }
@@ -376,6 +397,11 @@ while(my @ready = $sel->can_read) {
             my $peername = $sock->recv($buf, 4096, MSG_DONTWAIT);
             if ($peername) {
                 my ($peerport, $peeraddr) = sockaddr_in($peername);
+                if ($single_peer_mode and ($last_sock_peer_addr ne $peername)) {
+                    print "New sock peer ".inet_ntoa($peeraddr).":$peerport\n";
+                    print LOG "New sock peer ".inet_ntoa($peeraddr).":$peerport\n";
+                }
+                $last_sock_peer_addr = $peername;
                 
                 my $req;
                 $buf =~ /^(.*)/;   $req=$1;
