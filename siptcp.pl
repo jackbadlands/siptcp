@@ -245,8 +245,8 @@ sub process_capital_P_fow($$) {
     my ($headers, $data) = ($1, $2);
     printf LOG "headers len is %d, data len is %d\n", length $headers, length $data;
 
-    $headers =~ s!(?<=[^=\d])(\d+(?:\.\d+){3}(?:\:\d+)?)!patch_address($1)!ge;
-    $headers =~ s!received\=(\d+(?:\.\d+){3})\;rport\=(\d+)!patch_address_rp($1,$2)!ge;
+    $headers =~ s!(?<=[^=\d])(\d{1,3}(?:\.\d{1,3}){3}(?:\:\d+)?)!patch_address($1)!ge;
+    $headers =~ s!received\=(\d{1,3}(?:\.\d{1,3}){3})\;rport\=(\d+)!patch_address_rp($1,$2)!ge;
 
     my $c_addr = $srcaddr;
     if ($data =~ /\r\nc=IN IP4 (\d+(?:\.\d+){3})/s) {
@@ -315,8 +315,8 @@ sub process_capital_P_back($) {
     my ($headers, $data) = ($1, $2);
     printf LOG "headers len is %d, data len is %d [back]\n", length $headers, length $data;
 
-    $headers =~ s!(?<=[^=\d])(\d+(?:\.\d+){3}(?:\:\d+)?)!patch_address_rev($1)!ge;    
-    $headers =~ s!received\=(\d+(?:\.\d+){3})\;rport\=(\d+)!patch_address_rp_rev($1,$2)!ge;  
+    $headers =~ s!(?<=[^=\d])(\d{1,3}(?:\.\d{1,3}){3}(?:\:\d+)?)!patch_address_rev($1)!ge;    
+    $headers =~ s!received\=(\d{1,3}(?:\.\d{1,3}){3})\;rport\=(\d+)!patch_address_rp_rev($1,$2)!ge;  
 
     $buf = "$headers\r\n$data";
 
