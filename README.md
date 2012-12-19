@@ -17,7 +17,11 @@ My usecase:
     
 It works by searching SIP headers and data for IPv4 address:port occurences and replacing them by local port forwards. It does not comply with standards (regex hackery).
 
-Tested a bit with Linphone and Twinkle (you need to configure "SIP proxy 127.0.0.1:5040" and disable various tunnelings).
+Tested a bit with [Linphone](http://en.wikipedia.org/wiki/Linphone) 
+and [Twinkle](http://en.wikipedia.org/wiki/Twinkle_%28software%29) 
+(you need to configure "SIP proxy 127.0.0.1:5040" and disable various tunnelings). 
+Fails with [Qutecom](http://en.wikipedia.org/wiki/QuteCom) 
+and [Ekiga](http://en.wikipedia.org/wiki/Ekiga).
 
 
 
