@@ -11,11 +11,13 @@ My usecase:
     
 * Locally I run:
 
-        siptcp.pl c 93.174.88.117 4555 127.0.0.1 127.0.0.1 5060 86.64.162.35 5060
+        SINGLE_PEER=1 siptcp.pl c 93.174.88.117 4555 127.0.0.1 127.0.0.1 5040 86.64.162.35 5060
         
-    it means "Connect  to TCP 93.174.88.117:4555, 127.0.0.1 is my IP address, listen UDP 127.0.0.1:5060 and redirect it to peer's 86.64.162.35:5060 (ekiga.net)".
+    it means "Connect  to TCP 93.174.88.117:4555, 127.0.0.1 is my IP address, listen UDP 127.0.0.1:5040 and redirect it to peer's 86.64.162.35:5060 (ekiga.net)".
     
-It works by searching SIP headers and data for IPv4 address:port occurences and replacing them by local port forwards. It does not comply
+It works by searching SIP headers and data for IPv4 address:port occurences and replacing them by local port forwards. It does not comply with standards (regex hackery).
+
+Tested a bit with Linphone and Twinkle (you need to configure "SIP proxy 127.0.0.1:5040" and disable various tunnelings).
 
 
 
